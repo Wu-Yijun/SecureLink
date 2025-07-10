@@ -1,0 +1,9 @@
+[submodule "SecureLinkTest"]
+	path = SecureLinkTest
+	url = git@github.com:Wu-Yijun/SecureLinkTest.git
+[submodule "deploys"]
+	path = deploys
+	url = git@github.com:Wu-Yijun/deploys.git
+[submodule "assets-null"]
+	path = assets-null
+	url = git@github.com:Wu-Yijun/assets-null.git
