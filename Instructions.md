@@ -1,124 +1,218 @@
-# 基于 GitHub Actions 的高级私有文件安全发布方案
+# **基于 GitHub Actions 的高级私有文件安全发布方案**
 
-## 1. 方案概述
-本文档旨在设计一个分层级、自动化、高效且安全的高级文件发布系统. 该系统利用两个独立的 GitHub 仓库——一个私有仓库 (assets) 用于存储原始数据, 一个公共仓库 (deploys) 用于部署和公网访问.
+## **1. 方案概述**
 
-系统将文件访问权限划分为三个等级, 并通过 GitHub Actions 实现增量构建、路径混淆和客户端加密, 最终发布到 GitHub Pages.
+本文档旨在设计一个**最高安全级别**的、分层级、自动化的文件发布系统. 该方案的核心是利用一个私有仓库 (`assets`) 直接构建和发布 GitHub Pages, 同时通过一个公共的"助手"仓库 (`assetsHelper`) 来安全地管理文件上传入口, 从而确保包括源码、文件结构和访问令牌在内的所有敏感信息都保持私有.
 
-### 1.1. 核心原理
+### **1.1. 核心原理**
 
-#### 1.1.1. **存管分离:**
-- assets (私有仓库): 存放所有原始文件, 按来源仓库进行组织.
-- deploys (公共仓库): 托管最终生成的网页内容, 对外提供服务.
-#### 1.1.2. **三层访问模型:**
-- **Level 1: 完全公开 (Public)**
-    - **assets 路径:** `public/<repo_name>/...`
-    - **deploys URL:** `/<repo_name>/<path>/<file>`
-    - **说明:** 文件按原路径和原文件名发布, 任何人都可以访问.
-- **Level 2: 链接访问 (Secret)**
-    - **assets 路径:** `private/<repo_name>/...`
-    - **deploys URL:** `/secret/<sha256_hash>.<ext>`
-    - **说明:** 文件内容本身不加密, 但文件名被哈希替换. 只有知道确切链接的人才能访问, 防止目录遍历和文件名猜测. 这是一种"安全靠隐藏" (Security through obscurity) 的策略.
-- **Level 3: 密码访问 (Encrypted)**
-    - **assets 路径:** `encrypt/<repo_name>/...`
-    - **deploys URL:** `/encrypt?file=<random_name>`
-    - **说明:** 最高安全级别. 文件内容使用 AES-256 加密后存储在 `/encrypted/<random_name>` 路径. 访问者必须通过` /encrypt` 路径的查看器页面, 并提供正确的密码才能解密和下载文件.
-### 1.1.3. **模块化管理:**
-- **清单 (Manifest)**: 每个来源仓库 (<repo_name>) 都有一个独立的清单文件 (manifest/<repo_name>.json), 用于追踪该仓库下所有文件的状态, 实现高效的增量构建.
-- **密码:** 每个需要加密的来源仓库都有一个独立的密码配置文件 (.github/secrets/<repo_name>.yaml), 使密码管理更加清晰和安全.
+1. **架构: 彻底的私有化部署**  
+    * **`assets` (私有仓库)**: 系统的绝对核心. 它不仅存储所有原始文件, 还负责运行构建脚本、管理状态清单 (Manifest), 并通过 `actions/deploy-pages` 直接将构建产物发布到 GitHub Pages. 整个部署流程在私有环境中闭环完成.  
+    * **`assetsHelper` (公共仓库)**: 扮演一个安全的"代理"或"跳板机". 它本身不存储任何敏感数据, 仅包含一个可重用的 GitHub Actions 工作流. 其唯一作用是接收来自其他仓库的文件上传请求, 并使用一个具有 `assets` 仓库写入权限的令牌, 安全地将文件存入 `assets` 仓库.  
+    * **外部项目仓库 (调用方)**: 任何需要发布文件的项目, 只需调用 `assetsHelper` 的工作流即可, 无需直接接触 `assets` 仓库或其令牌.  
+2. **工作流**  
+    * **文件上传**: 外部仓库 \-\> 调用 `assetsHelper` 的可重用工作流 \-\> `assetsHelper` 使用专用令牌将文件写入 `assets` 仓库.  
+    * **构建与部署**: 对 `assets` 仓库的 `push` 操作 \-\> 触发 `assets` 内部的部署工作流 \-\> 构建页面、上传构建产物 (Artifact) \-\> `actions/deploy-pages` 将产物发布到 GitHub Pages.  
+3. **三层访问模型 (逻辑不变)**  
+    - **Level 1: 完全公开 (Public)**
+        * **assets 路径:** `public/<repo_name>/...`
+        * **deploy URL:** `/<repo_name>/<path>/<file>`
+        * **说明:** 文件按原路径和原文件名发布, 任何人都可以访问.
+    - **Level 2: 链接访问 (Secret)**
+        - **assets 路径:** `private/<repo_name>/...`
+        - **deploy URL:** `/secret/<sha256_hash>.<ext>`
+        - **说明:** 文件内容本身不加密, 但文件名被哈希替换. 只有知道确切链接的人才能访问, 防止目录遍历和文件名猜测. 这是一种"安全靠隐藏" (Security through obscurity) 的策略.
+    - **Level 3: 密码访问 (Encrypted)**
+        - **assets 路径:** `encrypt/<repo_name>/...`
+        - **deploy URL:** `/encrypt?file=<random_name>`
+        - **说明:** 最高安全级别. 文件内容使用 AES-256 加密后存储在 `/encrypted/<random_name>` 路径. 访问者必须通过` /encrypt` 路径的查看器页面, 并提供正确的密码才能解密和下载文件.
 
-### 1.2. 最终效果
+### **1.1.3. 模块化管理:**
+- **清单 (Manifest)**: 每个来源仓库 (`<repo_name>`) 都有一个独立的清单文件 (`manifest/<repo_name>.json`), 用于追踪该仓库下所有文件的状态, 实现高效的增量构建.
+- **密码:** 每个需要加密的来源仓库都有一个独立的密码配置文件 (`.github/secrets/<repo_name>.yaml`), 使密码管理更加清晰和安全.
+
+### **1.2. 最终效果**
+
+- **极致的安全**: 由于不再有公开的 `deploys` 仓库, 攻击者无法通过克隆 `gh-pages` 分支来窥探你的文件结构. 你的源文件、哈希文件名、加密文件等都存储在私有仓库中, 不会泄露.  
+- **令牌隔离**: 具有高权限的 `ASSETS_REPO_TOKEN` 被严格限制在 `assetsHelper` 仓库的 Secrets 中, 其他项目仓库无法接触到它, 大大降低了令牌滥用的风险.  
 - **灵活的权限控制:** 你可以根据文件敏感度, 将其放入不同目录, 实现三种不同的分享策略.
 - **极致的性能:** 增量构建机制确保只有变动的文件会被处理.
-- **最高的安全性:** 端到端加密确保即使 deploys 仓库被访问, 没有密码也无法获取加密文件的任何信息, 包括原始文件名.
 
-## 2. 详细设计与实施步骤
-### 2.1. 仓库设置
-#### 2.1.1. assets 仓库结构 (私有)
-```
-assets/
-├── .github/
-│   └── secrets/
-│       └── my-secret-project.yaml  # 项目专属的密码文件
-├── public/
-│   └── my-public-project/          # L1: 完全公开的文件
-│       └── docs/index.html
-├── private/
-│   └── my-internal-project/        # L2: 仅链接可访问的文件
-│       └── design_v1.png
-├── encrypt/
-│   └── my-secret-project/          # L3: 需要密码访问的文件
-│       └── financial-report.xlsx
-└── manifest/
-    └── my-public-project.json      # (此目录由Action自动创建和管理)
-```
+## **2. 详细设计与实施步骤**
 
-#### 2.1.2. 密码配置文件 (`.github/secrets/<repo_name>.yaml`)
+### **2.1. 仓库设置**
 
-```
-# .github/secrets/my-secret-project.yaml
+1. **assets 仓库 (私有)**  
+    - **结构**:  
+      ```yml
+      assets/ (私有)  
+      ├── .github/  
+      │   ├── secrets/  
+      │   │   └── my-secret-project.yaml  # 项目专属的密码文件  
+      │   └── workflows/  
+      │       └── deploy.yml              # 核心部署工作流  
+      ├── public/                         # 公开路径
+      ├── private/                        # 链接访问路径
+      ├── encrypt/                        # 加密文件路径
+      ├── secrets/                        # 链接访问文件存储
+      ├── encrypted/                      # 加密文件存储
+      ├── manifest/                       # 存储状态清单, 由Action自动管理  
+      └── scripts/  
+          ├── process-assets.js           # 核心处理脚本  
+          └── package.json                # 脚本依赖
+      ```
+    - **Settings > Pages**: 在 `Build and deployment` 部分, 将 Source 设置为 `GitHub Actions`.  
+2. **assetsHelper 仓库 (公共)**  
+    - **结构**:  
+      ```yml
+      assetsHelper/ (公共)  
+      └── .github/  
+          └── workflows/  
+              └── upload.yml              # 可重用的上传工作流
+      ```
 
-# 默认密码, 用于该项目下所有未被特别指定的加密文件
-default: "a-very-strong-default-password-!@#$"
+    - **Settings > Secrets and variables > Actions**:  
+      - 点击 `New repository secret`.  
+      - **Name**: `ASSETS_REPO_TOKEN`  
+      - **Value**: 粘贴一个拥有对 `assets` 仓库 `write` 权限的 Personal Access Token (PAT).  
+3. **外部项目仓库 (例如 `my-project`)**  
+   * 无需配置任何 Secret.  
+   * 仅需一个调用 `assetsHelper` 工作流的 Action 文件.
 
-# 为特定文件或目录指定密码
-files:
-  - path: "financial-report.xlsx" # 精确匹配文件 (相对于 encrypt/my-secret-project/ 目录)
-    password: "another-super-secret-password"
-```
+### **2.2. GitHub Actions 与处理脚本**
 
-#### 2.1.3 `deploys` 仓库结构 (公共)
+#### **2.2.1. `assetsHelper` 的可重用上传工作流 (`upload.yml`) **
 
-- 启用 `gh-pages` 分支的 GitHub Pages.
-- 在主分支中创建以下文件:
-    - `.github/workflows/deploy.yml`
-    - `scripts/process-assets.js`
-    - `scripts/viewer-template.html`
-
-### 2.2. 访问令牌配置
-此步骤不变. 确保在 deploys 仓库的 Actions secrets 中配置了 ASSETS_REPO_TOKEN.
-
-这是连接两个仓库的关键.
-
-1. 生成 Personal Access Token (PAT)
-    - 进入你的 GitHub Settings > Developer settings > Personal access tokens > Tokens (classic).
-    - 点击 Generate new token (classic).
-    - Note: 填写一个描述性的名称, 如 DEPLOYS_TO_ASSETS_ACCESS.
-    - Expiration: 选择一个合适的过期时间.
-    - Scopes: 勾选 repo 权限. 这将允许该令牌访问你的所有仓库.
-    - 点击 Generate token, 并立即复制生成的令牌, 因为离开页面后将无法再次看到.
-2. 在 deploys 仓库中配置 Secret
-    - 进入 deploys 仓库的 Settings > Secrets and variables > Actions.
-    - 点击 New repository secret.
-    - Name: ASSETS_REPO_TOKEN
-    - Value: 粘贴上一步复制的 PAT.
-    - 点击 Add secret.
-
-### 2.3. GitHub Actions 与处理脚本
-#### 2.3.1. 核心部署工作流 (`deploy.yml`)
-此工作流基本保持不变, 它作为调用处理脚本的启动器.
-
+这个工作流是外部世界与私有 `assets` 仓库沟通的唯一桥梁, 已加入目标路径安全校验.
 ```yml
-# .github/workflows/deploy.yml in 'deploys' repository
+# assetsHelper/.github/workflows/upload.yml
 
-name: Advanced Deploy Private Assets
+name: Reusable Asset Uploader
 
 on:
-  workflow_dispatch:
-  repository_dispatch:
-    types: [deploy-triggered]
-
+  workflow_call:
+    inputs:
+      source:
+        description: |
+          (from_repo=false)Source artifact name or
+          (from_repo=true)The directory from the source repository to sync
+        required: true
+        type: string
+      from_repo:
+        description: 'Whether to use the source from the calling repo (true/false)'
+        required: false
+        default: false
+        type: boolean
+      type:
+        description: 'Asset type (public, private, encrypt)'
+        required: false
+        default: public
+        type: string
+      destination:
+        description: 'The target subdirectory in assets repo (e.g., {type}/<repo_name>/{destination})'
+        required: false
+        default: ./
+        type: string
+      
 jobs:
-  build-and-deploy:
+  sync-to-assets:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout deploys repo (for script)
+      - name: Validate destination path and type
+        run: |
+          DEST="${{ inputs.destination }}"
+          TYPE="${{ inputs.type }}"
+
+          # Validate type
+          if [[ "$TYPE" != "public" && "$TYPE" != "private" && "$TYPE" != "encrypt" ]]; then
+            echo "❌ Error: type must be one of 'public', 'private', or 'encrypt'"
+            exit 1
+          fi
+
+          # Check for path traversal
+          if [[ "$DEST" == *".."* ]]; then
+            echo "❌ Error: destination must not contain '..'"
+            exit 1
+          fi
+
+          echo "✅ Destination and type are valid"
+
+      - name: Compute full destination path
+        id: path
+        run: |
+          DEST_PATH="${{ inputs.type }}/${{ github.event.repository.name }}/${{ inputs.destination }}"
+          echo "dest_path=$DEST_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout source repository (the calling repo) If needed
+        if: ${{ inputs.from_repo == 'true' }}
         uses: actions/checkout@v4
         with:
-          path: 'self'
+          repository: ${{ github.event.repository.full_name }}
+          path: source_repo
+
+      - name: Extract artifact If not from repo
+        if: ${{ inputs.from_repo == 'false' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.source }}
+          repository: ${{ github.event.repository.full_name }}
+          path: source_repo
+
+      - name: Checkout assets repository
+        uses: actions/checkout@v4
+        with:
+          repository: Wu-Yijun/assets # TODO: 替换为你的用户名
+          token: ${{ secrets.ASSETS_REPO_TOKEN }}
+          path: 'assets_repo'
+
+      - name: Sync files to assets
+        run: |
+          target_dir="assets_repo/${{ inputs.destination_dir }}"
+          source_dir="source_repo/${{ inputs.source_dir }}"
+          echo "Syncing from ${source_dir} to ${target_dir}"
+          mkdir -p "${target_dir}"
+          rsync -av --delete "${source_dir}/" "${target_dir}/"
+
+      - name: Commit and push to assets
+        run: |
+          cd assets_repo
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add .
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Sync from ${{ github.repository }}: ${{ inputs.destination_dir }}"
+            git push
+          fi
+```
+
+#### **2.2.2. `assets` 的核心部署工作流 (`deploy.yml`)**
+
+这是整个系统的引擎, 在 `assets` 仓库内部运行.
+
+```yml
+# assets/.github/workflows/deploy.yml
+
+name: Build and Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main # 或你的主分支
+  workflow_dispatch:
+
+permissions:
+  contents: write # 允许提交 manifest 更新
+  pages: write    # 允许部署到 Pages
+  id-token: write # 允许 OIDC 认证
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -126,53 +220,49 @@ jobs:
           node-version: '18'
       
       - name: Install Dependencies
-        run: npm install crypto-js js-yaml glob fs-extra
-        working-directory: ./self/scripts
-
-      - name: Create Deploy Target Directory
-        run: mkdir ./deploy_target
-
-      - name: Checkout assets repo (private repo)
-        uses: actions/checkout@v4
-        with:
-          repository: <YourGitHubUsername>/assets
-          token: ${{ secrets.ASSETS_REPO_TOKEN }}
-          path: 'assets_src'
-      
-      - name: Copy existing deployment from gh-pages
-        run: |
-          git clone --depth=1 --branch=gh-pages https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git ./deploy_target || echo "No existing gh-pages branch. Starting fresh."
-          # 清理旧文件, 但保留 .git 目录和 manifest
-          find ./deploy_target -mindepth 1 ! -name ".git" ! -name "manifest" -exec rm -rf {} +
+        working-directory: ./scripts
+        run: npm install
 
       - name: Run Asset Processing Script
         run: |
-          node self/scripts/process-assets.js \
-            --assets-path ./assets_src \
-            --deploy-path ./deploy_target \
-            --template-path ./self/scripts/viewer-template.html
-        
-      - name: Upload filename map as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: filename-map
-          path: ./deploy_target/map.json
+          node scripts/process-assets.js \
+            --assets-path . \
+            --deploy-path ./_site \
+            --template-path ./scripts/viewer-template.html
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+      - name: Commit updated manifests
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add manifest/
+          if git diff --staged --quiet; then
+            echo "Manifests are up-to-date."
+          else
+            git commit -m "Update manifests [skip ci]"
+            git push
+          fi
+      
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v2
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./deploy_target
-          user_name: 'github-actions[bot]'
-          user_email: 'github-actions[bot]@users.noreply.github.com'
-          commit_message: "Deploy: ${{ github.event.head_commit.message || 'Manual Trigger' }}"
-          keep_files: true # 保留 manifest 等未被覆盖的文件
+          path: './_site'
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
 ```
 
-请记得将 `<YourGitHubUsername>` 替换为你的 GitHub 用户名.
+#### **2.2.3. 文件处理脚本 (`process-assets.js`)**
 
-#### 2.3.2. 文件处理脚本 (`process-assets.js`) (重大更新)
-此脚本经过重写, 以支持三层模型和模块化管理.
+此脚本的逻辑与之前版本基本相同, 存放于 `assets/scripts/` 目录. 它现在从 `assets` 仓库的 `manifest/` 目录读取和写入状态, 并将最终产出放入 `_site` 文件夹.
+
 ```js
 // scripts/process-assets.js
 const fs = require('fs-extra');
@@ -315,8 +405,11 @@ async function main() {
 main().catch(console.error);
 ```
 
-#### 2.3.3. HTML 查看器模板 (`viewer-template.html`) (重大更新)
-此模板现在从外部文件获取加密数据, 而不是内联.
+
+#### **2.2.4. HTML 查看器模板 (`viewer-template.html`)**
+
+此模板也与上一版相同, 存放于 `assets/scripts/`.
+
 ```html
 <!DOCTYPE html>
 <html lang="en">
@@ -431,15 +524,48 @@ main().catch(console.error);
 </html>
 ```
 
-## 3. 使用流程总结
-- 准备文件: 根据所需安全级别, 将文件放入 `assets` 仓库的 `public/`, `private/`, 或 `encrypt/` 下对应的项目文件夹中.
-- 配置密码: 如果添加了 `encrypt` 目录下的文件, 确保在 `.github/secrets/` 中有对应的 `<repo_name>.yaml` 密码文件.
-- 触发部署: 推送更新到 `assets` 仓库, 或手动运行 deploys 仓库的 Action.
-- 获取链接:
-    - 公开文件: `https://<user>.github.io/deploys/<repo_name>/path/to/file.ext`
-    - 链接访问: 从 `map.json` 中找到 `private/<repo_name>/...` 对应的路径, 链接为 `https://<user>.github.io/deploys/secret/<hash>.ext`
-    - 密码访问: 从 `map.json` 中找到 `encrypt/<repo_name>/...` 对应的路径, 链接为 `https://<user>.github.io/deploys/encrypt?file=<random_name>.html`
 
-## 4. 安全性与注意事项
-- 客户端加密: 加解密过程完全在用户的浏览器中进行, 你的原始文件和密码永远不会在网络中明文传输 (除了用户在 URL 中主动提供密码的情况).
-- URL 中的密码: 在 URL 中直接附加 `&key=<password>` 虽然方便, 但密码会明文出现在浏览器历史记录、服务器日志中, 安全性较低. 仅在风险可控的情况下使用. 更好的方式是让用户手动输入密码.
+## **3. 使用流程总结**
+
+1. **准备文件 (外部项目)**: 在你的项目 (如 `my-project`) 中, 创建一个 `.github/workflows/publish.yml` 文件.  
+   这个工作流可以包含构建步骤. 例如, 你可以先运行一个编译命令, 将生成的文件放入一个临时目录 (如 `to_deploy`), 然后再调用 `assetsHelper` 的工作流来上传这个目录的内容.  
+    ```yml
+    # my-project/.github/workflows/publish.yml
+    name: Build and Publish Docs
+    on:
+      push:
+        branches: [ main ]
+    jobs:
+      call-uploader:
+        runs-on: ubuntu-latest
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+
+          - name: Create deployment directory
+            run: |
+              # 这是一个示例构建步骤. 实际项目中可能是 `npm run build` 等命令.
+              mkdir -p ./to_deploy
+              echo "Generated at $(date)" > ./to_deploy/index.html
+              # 假设你有一个 docs 目录需要复制
+              cp -r ./docs/* ./to_deploy/
+
+          - name: Call Reusable Uploader
+            uses: <YourGitHubUsername>/assetsHelper/.github/workflows/upload.yml@main
+            with:
+              source_dir: 'to_deploy' # 上传刚刚创建的目录
+              destination_dir: 'public/my-project' # 在assets仓库中的目标位置
+    ```
+2. **触发上传**: 推送代码到 `my-project` 的 `main` 分支, 将自动触发 `publish` 工作流.  
+3. **自动部署**: `assetsHelper` 接收到文件后, 会将其推送到 `assets` 仓库. `assets` 仓库的 `push` 事件会触发 `deploy.yml`, 完成所有处理和到 GitHub Pages 的部署.  
+4. **获取链接**: 流程与之前相同, 通过 `map.json` (在 Action 的 `filename-map` 构件中) 获取非公开文件的链接.
+    - 公开文件: `https://<user>.github.io/assets/<repo_name>/path/to/file.ext`
+    - 链接访问: 从 `map.json` 中找到 `private/<repo_name>/...` 对应的路径, 链接为 `https://<user>.github.io/assets/secret/<hash>.ext`
+    - 密码访问: 从 `map.json` 中找到 `encrypt/<repo_name>/...` 对应的路径, 链接为 `https://<user>.github.io/assets/encrypt?file=<random_name>.html`
+
+## **4. 安全性与注意事项**
+
+* **坚不可摧的隐私**: 这是目前最安全的方案. 由于部署源是私有仓库的 Action 产物, 外部用户永远无法访问到你的文件结构或源代码.  
+* **路径注入防护**: `assetsHelper` 的 `upload.yml` 工作流现在会严格校验 `destination_dir` 参数, 确保其必须以 `public/`, `private/` 或 `encrypt/` 开头, 且不包含路径遍历字符 (`..`). 这可以有效防止某个项目恶意或错误地修改其他项目的文件.  
+* **`[skip ci]`**: 在 `deploy.yml` 中提交 manifest 时使用 `[skip ci]` 至关重要, 它能有效防止因提交操作而再次触发自身, 避免无限循环.  
+* **关注点分离**: `assetsHelper` 负责"收", `assets` 负责"存"和"发", 职责清晰, 易于维护.
